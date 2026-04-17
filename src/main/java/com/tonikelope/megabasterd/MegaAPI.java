@@ -720,7 +720,43 @@ public class MegaAPI implements Serializable {
         return candidates;
     }
 
-    private ResolvedNodeKey _resolveNodeKey(String raw_node_key, String folder_key, String attr) {
+    private String _extractNodeKeyForHandle(String raw_node_key, String handle) {
+
+        if (raw_node_key != null && handle != null) {
+
+            for (String entry : raw_node_key.split("/")) {
+
+                String[] parts = entry.split(":", 2);
+
+                if (parts.length == 2 && handle.equals(parts[0]) && !parts[1].isEmpty()) {
+                    return parts[1];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private ResolvedNodeKey _tryResolveNodeKey(String enc_node_key, byte[] folder_key_bytes, String attr) {
+
+        try {
+
+            String dec_node_k = Bin2UrlBASE64(decryptKey(UrlBASE642Bin(enc_node_key), folder_key_bytes));
+
+            HashMap at = _decAttr(attr, _urlBase64KeyDecode(dec_node_k));
+
+            if (at != null && at.get("n") instanceof String) {
+                return new ResolvedNodeKey(dec_node_k, at);
+            }
+
+        } catch (Exception ex) {
+            LOG.log(Level.FINE, "Skipping invalid MEGA node key candidate", ex);
+        }
+
+        return null;
+    }
+
+    private ResolvedNodeKey _resolveNodeKey(String raw_node_key, String root_handle, String folder_key, String attr) {
 
         if (attr == null) {
             return null;
@@ -730,20 +766,27 @@ public class MegaAPI implements Serializable {
 
             byte[] folder_key_bytes = _urlBase64KeyDecode(folder_key);
 
+            String selected_node_key = _extractNodeKeyForHandle(raw_node_key, root_handle);
+
+            if (selected_node_key != null) {
+
+                ResolvedNodeKey resolved_node_key = _tryResolveNodeKey(selected_node_key, folder_key_bytes, attr);
+
+                if (resolved_node_key != null) {
+                    return resolved_node_key;
+                }
+            }
+
             for (String enc_node_key : _extractNodeKeyCandidates(raw_node_key)) {
 
-                try {
+                if (selected_node_key != null && selected_node_key.equals(enc_node_key)) {
+                    continue;
+                }
 
-                    String dec_node_k = Bin2UrlBASE64(decryptKey(UrlBASE642Bin(enc_node_key), folder_key_bytes));
+                ResolvedNodeKey resolved_node_key = _tryResolveNodeKey(enc_node_key, folder_key_bytes, attr);
 
-                    HashMap at = _decAttr(attr, _urlBase64KeyDecode(dec_node_k));
-
-                    if (at != null && at.get("n") instanceof String) {
-                        return new ResolvedNodeKey(dec_node_k, at);
-                    }
-
-                } catch (Exception ex) {
-                    LOG.log(Level.FINE, "Skipping invalid MEGA node key candidate", ex);
+                if (resolved_node_key != null) {
+                    return resolved_node_key;
                 }
             }
 
@@ -1180,7 +1223,15 @@ public class MegaAPI implements Serializable {
 
             folder_nodes = new HashMap<>();
 
-            int s = ((List) res_map[0].get("f")).size();
+            List folder_entries = (List) res_map[0].get("f");
+
+            String root_handle = null;
+
+            if (!folder_entries.isEmpty() && ((HashMap<String, Object>) folder_entries.get(0)).get("h") instanceof String) {
+                root_handle = (String) ((HashMap<String, Object>) folder_entries.get(0)).get("h");
+            }
+
+            int s = folder_entries.size();
 
             if (bar != null) {
                 MiscTools.GUIRun(() -> {
@@ -1191,7 +1242,7 @@ public class MegaAPI implements Serializable {
             }
             int conta_nodo = 0;
 
-            for (Object o : (Iterable<? extends Object>) res_map[0].get("f")) {
+            for (Object o : (Iterable<? extends Object>) folder_entries) {
 
                 conta_nodo++;
 
@@ -1206,7 +1257,7 @@ public class MegaAPI implements Serializable {
 
                 HashMap<String, Object> node = (HashMap<String, Object>) o;
 
-                ResolvedNodeKey resolved_node_key = _resolveNodeKey((String) node.get("k"), folder_key, (String) node.get("a"));
+                ResolvedNodeKey resolved_node_key = _resolveNodeKey((String) node.get("k"), root_handle, folder_key, (String) node.get("a"));
 
                 if (resolved_node_key != null) {
 
