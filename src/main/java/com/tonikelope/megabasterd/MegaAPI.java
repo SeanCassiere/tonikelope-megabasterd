@@ -48,6 +48,17 @@ import javax.swing.JProgressBar;
  */
 public class MegaAPI implements Serializable {
 
+    private static final class ResolvedNodeKey {
+
+        private final String _decoded_key;
+        private final HashMap _attributes;
+
+        private ResolvedNodeKey(String decoded_key, HashMap attributes) {
+            _decoded_key = decoded_key;
+            _attributes = attributes;
+        }
+    }
+
     public static final String API_URL = "https://g.api.mega.co.nz";
     public static String API_KEY = null;
     public static final int REQ_ID_LENGTH = 10;
@@ -690,6 +701,102 @@ public class MegaAPI implements Serializable {
         return res_map;
     }
 
+    private ArrayList<String> _extractNodeKeyCandidates(String raw_node_key) {
+
+        ArrayList<String> candidates = new ArrayList<>();
+
+        if (raw_node_key != null) {
+
+            for (String entry : raw_node_key.split("/")) {
+
+                String[] parts = entry.split(":", 2);
+
+                if (parts.length == 2 && !parts[0].isEmpty() && !parts[1].isEmpty()) {
+                    candidates.add(parts[1]);
+                }
+            }
+        }
+
+        return candidates;
+    }
+
+    private String _extractNodeKeyForHandle(String raw_node_key, String handle) {
+
+        if (raw_node_key != null && handle != null) {
+
+            for (String entry : raw_node_key.split("/")) {
+
+                String[] parts = entry.split(":", 2);
+
+                if (parts.length == 2 && handle.equals(parts[0]) && !parts[1].isEmpty()) {
+                    return parts[1];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private ResolvedNodeKey _tryResolveNodeKey(String enc_node_key, byte[] folder_key_bytes, String attr) {
+
+        try {
+
+            String dec_node_k = Bin2UrlBASE64(decryptKey(UrlBASE642Bin(enc_node_key), folder_key_bytes));
+
+            HashMap at = _decAttr(attr, _urlBase64KeyDecode(dec_node_k));
+
+            if (at != null && at.get("n") instanceof String) {
+                return new ResolvedNodeKey(dec_node_k, at);
+            }
+
+        } catch (Exception ex) {
+            LOG.log(Level.FINE, "Skipping invalid MEGA node key candidate", ex);
+        }
+
+        return null;
+    }
+
+    private ResolvedNodeKey _resolveNodeKey(String raw_node_key, String root_handle, String folder_key, String attr) {
+
+        if (attr == null) {
+            return null;
+        }
+
+        try {
+
+            byte[] folder_key_bytes = _urlBase64KeyDecode(folder_key);
+
+            String selected_node_key = _extractNodeKeyForHandle(raw_node_key, root_handle);
+
+            if (selected_node_key != null) {
+
+                ResolvedNodeKey resolved_node_key = _tryResolveNodeKey(selected_node_key, folder_key_bytes, attr);
+
+                if (resolved_node_key != null) {
+                    return resolved_node_key;
+                }
+            }
+
+            for (String enc_node_key : _extractNodeKeyCandidates(raw_node_key)) {
+
+                if (selected_node_key != null && selected_node_key.equals(enc_node_key)) {
+                    continue;
+                }
+
+                ResolvedNodeKey resolved_node_key = _tryResolveNodeKey(enc_node_key, folder_key_bytes, attr);
+
+                if (resolved_node_key != null) {
+                    return resolved_node_key;
+                }
+            }
+
+        } catch (Exception ex) {
+            LOG.log(Level.WARNING, "Unable to resolve MEGA node key", ex);
+        }
+
+        return null;
+    }
+
     public String initUploadFile(String filename) throws MegaAPIException {
 
         String ul_url = null;
@@ -1116,7 +1223,15 @@ public class MegaAPI implements Serializable {
 
             folder_nodes = new HashMap<>();
 
-            int s = ((List) res_map[0].get("f")).size();
+            List folder_entries = (List) res_map[0].get("f");
+
+            String root_handle = null;
+
+            if (!folder_entries.isEmpty() && ((HashMap<String, Object>) folder_entries.get(0)).get("h") instanceof String) {
+                root_handle = (String) ((HashMap<String, Object>) folder_entries.get(0)).get("h");
+            }
+
+            int s = folder_entries.size();
 
             if (bar != null) {
                 MiscTools.GUIRun(() -> {
@@ -1127,7 +1242,7 @@ public class MegaAPI implements Serializable {
             }
             int conta_nodo = 0;
 
-            for (Object o : (Iterable<? extends Object>) res_map[0].get("f")) {
+            for (Object o : (Iterable<? extends Object>) folder_entries) {
 
                 conta_nodo++;
 
@@ -1142,15 +1257,11 @@ public class MegaAPI implements Serializable {
 
                 HashMap<String, Object> node = (HashMap<String, Object>) o;
 
-                String[] node_k = ((String) node.get("k")).split(":");
+                ResolvedNodeKey resolved_node_key = _resolveNodeKey((String) node.get("k"), root_handle, folder_key, (String) node.get("a"));
 
-                if (node_k.length == 2 && node_k[0] != "" && node_k[1] != "") {
+                if (resolved_node_key != null) {
 
                     try {
-
-                        String dec_node_k = Bin2UrlBASE64(decryptKey(UrlBASE642Bin(node_k[1]), _urlBase64KeyDecode(folder_key)));
-
-                        HashMap at = _decAttr((String) node.get("a"), _urlBase64KeyDecode(dec_node_k));
 
                         HashMap<String, Object> the_node = new HashMap<>();
 
@@ -1158,7 +1269,7 @@ public class MegaAPI implements Serializable {
 
                         the_node.put("parent", node.get("p"));
 
-                        the_node.put("key", dec_node_k);
+                        the_node.put("key", resolved_node_key._decoded_key);
 
                         if (node.get("s") != null) {
 
@@ -1176,7 +1287,7 @@ public class MegaAPI implements Serializable {
                             the_node.put("size", 0L);
                         }
 
-                        the_node.put("name", at.get("n"));
+                        the_node.put("name", resolved_node_key._attributes.get("n"));
 
                         the_node.put("h", node.get("h"));
 
@@ -1255,60 +1366,17 @@ public class MegaAPI implements Serializable {
 
         ArrayList<String> nlinks = new ArrayList<>();
 
-        String res = null;
+        HashMap<String, Object> folder_nodes = getFolderNodes(folder_id, folder_key, null, cache);
 
-        if (cache) {
-            res = getCachedFolderNodes(folder_id);
-        }
+        if (folder_nodes != null) {
 
-        if (res == null) {
+            for (String file_id : file_ids) {
 
-            String request = "[{\"a\":\"f\", \"c\":\"1\", \"r\":\"1\", \"ca\":\"1\"}]";
+                HashMap<String, Object> node = (HashMap<String, Object>) folder_nodes.get(file_id);
 
-            URL url_api = new URL(API_URL + "/cs?id=" + String.valueOf(_seqno) + "&n=" + folder_id);
-
-            res = RAW_REQUEST(request, url_api);
-
-            if (res != null) {
-                writeCachedFolderNodes(folder_id, res);
-            }
-        }
-
-        LOG.log(Level.INFO, "MEGA FOLDER {0} JSON FILE TREE SIZE -> {1}", new Object[]{folder_id, MiscTools.formatBytes((long) res.length())});
-
-        if (res != null) {
-
-            ObjectMapper objectMapper = new ObjectMapper();
-
-            HashMap[] res_map = objectMapper.readValue(res, HashMap[].class);
-
-            for (Object o : (Iterable<? extends Object>) res_map[0].get("f")) {
-
-                HashMap<String, Object> node = (HashMap<String, Object>) o;
-
-                String[] node_k = ((String) node.get("k")).split(":");
-
-                if (node_k.length == 2 && node_k[0] != "" && node_k[1] != "") {
-
-                    try {
-
-                        String dec_node_k = Bin2UrlBASE64(decryptKey(UrlBASE642Bin(node_k[1]), _urlBase64KeyDecode(folder_key)));
-
-                        if (file_ids.contains((String) node.get("h"))) {
-
-                            //Este es el que queremos
-                            nlinks.add("https://mega.nz/#N!" + ((String) node.get("h")) + "!" + dec_node_k + "###n=" + folder_id);
-
-                        }
-
-                    } catch (Exception e) {
-                        LOG.log(Level.WARNING, "WARNING: node key is not valid " + (String) node.get("k") + " " + folder_key);
-                    }
-
-                } else {
-                    LOG.log(Level.WARNING, "WARNING: node key is not valid " + (String) node.get("k") + " " + folder_key);
+                if (node != null && node.get("key") != null) {
+                    nlinks.add("https://mega.nz/#N!" + file_id + "!" + (String) node.get("key") + "###n=" + folder_id);
                 }
-
             }
 
         } else {
