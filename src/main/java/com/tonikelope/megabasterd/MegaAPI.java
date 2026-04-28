@@ -1147,7 +1147,15 @@ public class MegaAPI implements Serializable {
         return ch;
     }
 
+    private static boolean isAlwaysReloadMegaFoldersEnabled() {
+        return "yes".equals(DBTools.selectSettingValue("always_reload_mega_folders"));
+    }
+
     public boolean existsCachedFolderNodes(String folder_id) {
+        if (isAlwaysReloadMegaFoldersEnabled()) {
+            return false;
+        }
+
         return Files.exists(Paths.get(System.getProperty("java.io.tmpdir") + File.separator + "megabasterd_folder_cache_" + folder_id));
     }
 
@@ -1184,7 +1192,7 @@ public class MegaAPI implements Serializable {
         HashMap<String, Object> folder_nodes = null;
         String res = null;
 
-        if (cache) {
+        if (cache && !isAlwaysReloadMegaFoldersEnabled()) {
             res = getCachedFolderNodes(folder_id);
         }
 
@@ -1290,7 +1298,7 @@ public class MegaAPI implements Serializable {
         HashMap<String, Object> folder_nodes = null;
         String res = null;
 
-        if (cache) {
+        if (cache && !isAlwaysReloadMegaFoldersEnabled()) {
             res = getCachedFolderNodes(folder_id);
         }
 
